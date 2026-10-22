@@ -1,0 +1,193 @@
+# The AWS side: stack, tests and deploys
+
+## Stack
+
+State lives in an S3 bucket with versioning and encryption. OpenTofu 1.10 and
+later lock state with a file in the same bucket (`use_lockfile = true`), so
+no DynamoDB table is needed.
+
+The network is a VPC with private subnets for tasks and one NAT gateway per
+availability zone. Check that each private route table points at the NAT in
+its own zone, because traffic that crosses zones costs $0.01 per GB in each
+direction. The NAT gateways' elastic IPs are the stack's fixed outbound
+addresses, which databases and partners can allowlist. Add an S3 gateway
+endpoint to the private route tables as well. It is free, and ECR serves image
+layers from S3, so without it every task start downloads its image through
+the NAT at $0.045 per GB.
+
+One Application Load Balancer fronts every public service, with an ACM
+certificate covering all the hostnames, one listener rule per service matched
+on the host header, and a redirect from HTTP to HTTPS. Turn on deletion
+protection, `drop_invalid_header_fields`, a TLS 1.3 security policy and access
+logs to S3. Access logs need SSE-S3 encryption on the bucket, since the load
+balancer can't write to a bucket that uses KMS.
+
+The ECS cluster uses Fargate, plus Fargate Spot for batch work that is safe to
+retry. A single typed map of services drives the task definitions, services
+and target groups. Each entry corresponds to one Railway service and holds its
+image, release group, CPU and memory, working directory, hostnames, health
+path, whether it runs on Spot, and a heap size where one is needed.
+
+Each service reads its env from one Secrets Manager secret holding a JSON
+object. The task definition maps every name listed in a committed
+`env-keys.json` with a `valueFrom` of `<secret-arn>:<KEY>::`, so values never
+enter git or Tofu state. A value Tofu creates itself, such as the URL of a
+cache it provisions, goes in a separate secret.
+
+A Railway Redis without a volume was a cache, and ElastiCache (Valkey) with
+TLS and an auth token replaces it.
+
+Tasks get an execution role that can pull from ECR, write logs and read
+secrets under one prefix, and a task role with at least what ECS Exec needs.
+CI deploys through a GitHub OIDC role whose trust policy names a GitHub
+environment that only `main` can deploy to.
+
+For visibility, turn on Container Insights, give every service a log group
+with a retention period, alarm on target 5xx responses and on unhealthy
+targets per target group, add an AWS Budgets alert on forecast and actual
+spend, and send VPC flow logs to S3 with ten-minute aggregation so you can see
+where egress goes.
+
+## Settings that reproduce Railway's behavior
+
+```hcl
+# A scheduler must never run twice, so the old task stops first.
+deployment_minimum_healthy_percent = each.key == "scheduler" ? 0 : 100
+deployment_maximum_percent         = each.key == "scheduler" ? 100 : 200
+
+# A release that crash-loops rolls itself back.
+deployment_circuit_breaker {
+  enable   = true
+  rollback = true
+}
+
+# Only web rolls back on the web 5xx alarm; give other public services
+# their own alarm if they need the same.
+dynamic "alarms" {
+  for_each = each.key == "web" ? [1] : []
+  content {
+    alarm_names = [aws_cloudwatch_metric_alarm.web_5xx.alarm_name]
+    enable      = true
+    rollback    = true
+  }
+}
+```
+
+In the container definition, `stopTimeout` can be at most 120 seconds on
+Fargate, and ECS kills the container that long after sending SIGTERM. Set
+the worker's own deadlines, measured from SIGTERM, below it: stop taking work
+and drain until 100 seconds, then force-stop at 110. Railway only checked health during a
+deploy, while an ECS container health check keeps running and replaces tasks
+that fail it. A worker whose health endpoint shares an event loop with heavy
+jobs will miss a few checks under load, so give workers a long tolerance (a
+60 second interval with 10 retries) and a start period long enough for them
+to boot. Set the heap size explicitly wherever the new container is much
+smaller than the Railway replica was, because Node sizes its default heap
+from the memory limit.
+
+Behind the ALB, the client's IP is the last entry in X-Forwarded-For, because
+the load balancer appends the address it received the connection from. Give
+the app an explicit setting that says it runs behind an ALB, have it trust
+only that last entry and ignore `x-real-ip`, and test it with forged headers.
+If a CDN or proxy sits in front of the ALB (a proxied Cloudflare record, for
+example), the last entry is that proxy's address, so trust the entry the
+proxy appended instead, or the proxy's own client-IP header, and only from
+the proxy's published address ranges.
+
+## Tests that run before every apply
+
+`tofu test` with `mock_provider "aws"` and `mock_provider "random"` plans and
+applies the whole stack against fake providers in a few seconds. The AWS
+provider still validated ARN-shaped arguments against mocks in our runs, so give the mocks
+real-looking ARNs for `aws_iam_role`, `aws_lb`, `aws_lb_listener`,
+`aws_lb_target_group`, `aws_acm_certificate`, `aws_secretsmanager_secret`,
+`aws_sns_topic` and `aws_s3_bucket`, and give `random_password` a result of at
+least sixteen characters, the minimum ElastiCache accepts for an auth
+token.
+
+The tests can read the old platform's files directly, so parity checks stay
+true when someone edits `railway.json`:
+`jsondecode(file("../../apps/api/railway.json")).deploy.healthcheckPath`.
+
+Guard the replica map with variable validations so that `tofu plan` itself
+rejects a misspelled service name, which would otherwise run zero copies of
+the intended service, and a scheduler count above one.
+
+These assertions earned their place in the original migration:
+
+- each service runs its own release group's image tag;
+- no variable name appears in both `environment` and `secrets`;
+- each secret maps to the right key in the right secret;
+- the certificate covers exactly the routed hostnames, and only services with
+  hostnames sit behind the load balancer;
+- worker memory exceeds the heap size, and worker shutdown fits inside the
+  stop timeout;
+- the scheduler's deployment settings never overlap two copies;
+- the S3 gateway endpoint is on every private route table;
+- web deploys roll back on the 5xx alarm.
+
+Break each asserted setting once on purpose and confirm the suite fails, so
+you know the assertions test something.
+
+## The CI deploy workflow
+
+Railway redeploys a service only when files in its watch patterns change, and
+many teams add release windows on top. Keep that behavior per release group,
+for example web and small apps on every merge, interactive workers every 20
+minutes and batch workers every 90, and ship a group only when its watch
+patterns match the changed files. Two details make the matching correct.
+Node's `path.matchesGlob` skips dotfiles where Railway's gitignore-style
+patterns don't, so match `dir/**` as a prefix. Run `git diff --name-only
+--no-renames` so that a file moved out of a watched directory counts there.
+
+Give each lane its own concurrency group with `cancel-in-progress: false`.
+Merges that land during a build then collapse into one pending run for the
+newest commit. Serialize the apply step across all lanes with a single
+concurrency group that sets `queue: max`, so a merge can't replace a pending
+worker release.
+
+Inside that lock, read the currently deployed image tags again, move a group
+only to a commit that descends from the one it runs (`git merge-base
+--is-ancestor`), and always apply from the newest commit on main. Plan to a
+file, run `scripts/check-replica-drops.mjs` on it, then apply that saved plan.
+A change under the infra directory should apply even when no image needs
+building.
+
+Tag each deployed image `deployed-<group>-<sha>`, and add an ECR lifecycle
+rule for that tag pattern with a lower `rulePriority` number than the "keep
+the last N" rule and a count high enough that it never triggers. ECR
+evaluates rules in priority order and won't let a later rule expire an image
+that an earlier rule matched, so a rarely redeployed service keeps the image
+it runs. The cost is that old `deployed-*` images never expire on their own;
+prune them occasionally. Also expire untagged manifests left behind by the
+build cache.
+
+Use `shell: bash` on steps that pipe. GitHub's default shell for `run` doesn't
+set `pipefail`, so a failing command piped into `tee` passes. When reading
+state that may not exist yet, treat only "not found" errors as empty, because
+an access-denied error read as "no tags yet" ships every group.
+
+After a squash merge, the image tags recorded during the migration point at
+branch commits that are not ancestors of main, so the ancestry rule refuses
+every update. Before the first CI deploy, replace the recorded tags with a
+marker such as `bootstrap`, and have the deploy treat a recorded value that
+isn't a commit in the repo (`git cat-file -e <value>^{commit}` fails) as "no
+previous deploy", which allows the update.
+
+## Cost
+
+Railway bills what each replica uses, while Fargate bills what each task
+reserves. Keeping Railway's replica counts at full per-task sizes can cost
+several times the Railway bill, so price each service before cutover. The
+usual levers are fewer replicas each running more concurrent work, Fargate
+Spot for batch jobs, a Compute Savings Plan and arm64 images.
+
+NAT gateways cost about $32 a month each plus $0.045 per GB processed in both
+directions, which at a few terabytes a month comes to hundreds of dollars
+before data transfer charges. Measure each service's network traffic on
+Railway first. The S3 gateway endpoint takes image pulls off that bill.
+PrivateLink or VPC peering to the database, cache and queue removes most of
+the rest, and heavy batch workers can run in public subnets if they don't
+need fixed outbound addresses. Traffic to another AWS region costs about $0.02
+per GB, so run compute in the region that holds the database and queue, and
+know which dependencies live elsewhere.
