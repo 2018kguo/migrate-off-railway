@@ -92,6 +92,17 @@ to boot. Set the heap size explicitly wherever the new container is much
 smaller than the Railway replica was, because Node sizes its default heap
 from the memory limit.
 
+The ALB keeps idle connections to a target open for its idle timeout and
+reuses them. If the app closes an idle keep-alive connection sooner (Node's
+default is 5 seconds), a request the ALB sends down a connection the app
+has just closed comes back as a 502 with no response from the target. It
+shows up as a steady trickle of 502s whose access-log entries have a target
+status of `-` and a response processing time of `-1`. Set the app's
+keep-alive timeout above the ALB's idle timeout. When the server is built
+by a framework that doesn't pass options through (Nitro's node server, for
+one), a small module loaded with `node --import` can set the default on
+every `http.createServer` call.
+
 Behind the ALB, the client's IP is the last entry in X-Forwarded-For, because
 the load balancer appends the address it received the connection from. Give
 the app an explicit setting that says it runs behind an ALB, have it trust

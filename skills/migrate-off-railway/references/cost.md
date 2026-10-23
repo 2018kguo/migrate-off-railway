@@ -270,10 +270,19 @@ Not run in the original migration; verify each step.
   A NAT instance per availability zone (a Graviton instance with
   source/destination checks off) has no per-GB charge, but it is a single
   point of failure for its zone where a gateway is redundant within it.
-  Size it on baseline network bandwidth, because a small instance's
-  baseline is a fraction of the "up to" figure and of a gateway's, and a
-  sustained burst past it throttles the whole zone. Measure the gateways' peak
-  per-minute throughput first. Give each zone a network interface of its
+  Size it on baseline network bandwidth and packets per second, because a
+  small instance's baseline is a fraction of the "up to" figure and of a
+  gateway's. Average throughput is a poor guide: traffic arrives in
+  bursts, and a burstable instance can drop packets at its allowances while
+  its average sits far below its baseline. A network-optimized type (such
+  as c7gn.medium, with a baseline about twelve times a t4g.medium's) is the
+  usual choice. After moving a zone, read the ENA counters
+  (`ethtool -S`: `bw_in_allowance_exceeded`, `bw_out_allowance_exceeded`,
+  `pps_allowance_exceeded`) twice a minute apart; if they rise, the
+  instance is too small. To resize without an outage, route the zone
+  through another zone's NAT instance, stop the instance, change its type,
+  start it, check it forwards, and route the zone back; the interface,
+  Elastic IP and saved iptables rules carry over a stop and start. Give each zone a network interface of its
   own, created before the instance, so a replaced instance keeps the
   zone's route and address, with a security group that admits all traffic
   from the VPC's private subnets. On
@@ -283,10 +292,12 @@ Not run in the original migration; verify each step.
   `dnf-automatic` never sees an update), and save the iptables rules.
   Install `conntrack-tools` (not there by default) so you can see the
   flows. Alarm on failed status checks (recover and reboot actions), on an
-  instance that forwards almost nothing, and on ENA's
-  `conntrack_allowance_exceeded` and `bw_in_allowance_exceeded` /
-  `bw_out_allowance_exceeded` counters (from `ethtool -S`), which rise
-  when EC2 starts dropping flows or packets at the instance's limits.
+  instance that forwards almost nothing, and on a rise in each of ENA's
+  allowance counters (`conntrack_allowance_exceeded`,
+  `bw_in_allowance_exceeded`, `bw_out_allowance_exceeded`,
+  `pps_allowance_exceeded`), published from `ethtool -S` every minute,
+  which is how EC2 reports dropping flows or packets at the instance's
+  limits.
 
   Two failures pass every health check. With an existing interface as an
   instance's primary, the AWS provider flips source/destination checking

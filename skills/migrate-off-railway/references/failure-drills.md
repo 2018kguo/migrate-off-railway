@@ -15,6 +15,7 @@ phase you're in. Placeholders are in angle brackets.
 | A worker is killed mid-drain | `tofu test` that the worker's force-stop deadline is below `stopTimeout` | Asserted |
 | The heap is larger than the container | `tofu test`: memory at least heap plus 2 GB for workers, heap at most 75% for the rest | Asserted for every service |
 | The ALB's client IP is spoofable | `curl -H 'x-real-ip: 1.2.3.4' -H 'X-Forwarded-For: 5.6.7.8' https://<shadow-host>/<endpoint that logs the IP>` through the shadow stack | The logged IP is yours, not either forged one |
+| The app closes keep-alive connections before the ALB does (steady 502s) | Count ALB access-log entries with `elb_status_code` 502, `target_status_code` `-` and `response_processing_time` `-1` over an hour | None; otherwise raise the app's keep-alive timeout above the ALB's idle timeout |
 | Build-time env never reached the image | `docker run --rm <image> grep -rl '<known public value>' <bundle dir>` | At least one file |
 | An image misses a module the app imports | Start each image with no secrets | It stops at the app's own env validation, not at an import error |
 | An assertion tests nothing | Break each asserted setting once and rerun `tofu test` | Each break fails the suite |
@@ -96,6 +97,10 @@ After switching a zone:
   minutes. The load balancer's health checks don't need egress and will
   stay green while tasks can't reach their database.
 - Expect connections to reset at each route change, twice per zone.
+- Read the instance's ENA allowance counters twice a minute apart. A rise
+  in `bw_in_allowance_exceeded`, `bw_out_allowance_exceeded` or
+  `pps_allowance_exceeded` means EC2 is dropping packets: resize the
+  instance (route the zone through a neighbour first).
 - Check the zone's outbound address, not only its route. A move that
   stopped after routing to the instance but before the Elastic IP
   attached leaves the zone on the temporary address, and a re-run that
