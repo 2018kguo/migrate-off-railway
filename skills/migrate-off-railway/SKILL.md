@@ -46,6 +46,34 @@ so after the inventory, work out which steps apply and skip the rest.
 | A database, Redis or bucket with data lives on Railway | Plan and rehearse the data move first. It sets the length of any write freeze. |
 | Some services stay on Railway for now | Point the services that move at the ones that stay through their public hostnames, since `*.railway.internal` only resolves inside Railway, and expect egress charges on both sides. |
 | The target is Kubernetes (EKS or another cluster) | The order, the checks and the Railway notes carry over; the stack and its settings don't (`references/stateful-and-other-cases.md`). |
+| A few services, no release windows or watch patterns on Railway | Deploy every service on every merge and skip the release planner and its check. |
+
+## Before you start
+
+Check the tools first, and stop to ask for whatever is missing:
+
+- `railway whoami` and `railway --version`. The Railway notes were checked
+  against CLI 5.71, so recheck anything marked "observed" on a newer one.
+- `aws sts get-caller-identity` names the account you mean to deploy into.
+- `tofu version` is 1.10 or later, which locks state without a DynamoDB table.
+- Node 22 or later runs the scripts and their tests.
+- Something builds amd64 images: CI, CodeBuild, or Docker on an amd64
+  machine. Emulating amd64 on an arm64 laptop is too slow for a large build.
+
+Then ask the person you're working with, before writing any infrastructure:
+
+- Which AWS account and region. Compute belongs in the region that holds the
+  database and queue.
+- Who hosts DNS for the hostnames users call, and whether records can be
+  changed through that provider's API.
+- ECS or Kubernetes.
+- Which Railway projects and environments are in scope. The inventory lists
+  everything else in the account, and staging environments or side projects
+  sometimes share variables or a branch with production.
+- What the new stack may cost each month. At Railway's replica counts and
+  full-size tasks, Fargate can cost several times the Railway bill.
+- Whether CI should apply the stack once the move is done, and which CI
+  system runs it.
 
 ## How to run it
 
@@ -55,11 +83,13 @@ breaks halfway through, that log answers "what changed" in a minute.
 
 Work in this order, reading the matching reference as you reach each phase.
 
-1. Inventory. Link a directory to the project with `railway link`, run
-   `scripts/railway-inventory.mjs` in it, and fill in the decision table
-   below for every service.
-   `references/railway-footguns.md` lists what the inventory has to look for
-   beyond what the script reports.
+1. Inventory. Link a directory to the project with `railway link`, and from
+   that directory run `node <skill-dir>/scripts/railway-inventory.mjs
+   production > inventory.md`, where `<skill-dir>` is the directory holding
+   this file. Run `railway metrics --all --network --since 7d -e production`
+   once for every service's traffic, which sets the NAT estimate. Fill in the decision table
+   below for every service. `references/railway-footguns.md` lists what the
+   inventory has to look for beyond what the script reports.
 2. Images and stack. Build the images and an OpenTofu stack with every replica
    count at 0, following `references/aws-blueprint.md`. Nothing receives
    traffic yet.
@@ -92,6 +122,8 @@ going further. Each one either moves real users or is hard to undo.
 - Starting new workers on queues that production already uses
 - Changing DNS for a hostname that users or integrations call
 - Stopping or retiring a Railway service
+- Deleting Railway services, shared variables or buckets, after which a
+  rollback means rebuilding them
 - Changing a URL or setting in a third-party dashboard
 - Turning on CI-driven applies
 - Writing a newly rotated secret into Railway, if the reason for leaving is a
@@ -108,7 +140,7 @@ Before the first apply:
 | Workers finish shutting down inside Fargate's 120 second stop timeout | `tofu test` on the shutdown grace env and `stopTimeout` | The worker's force-stop deadline, measured from SIGTERM, is below `stopTimeout` |
 | Smaller containers don't shrink the heap by accident | `tofu test` on `NODE_OPTIONS` or the equivalent | An explicit heap size wherever the old limit was much larger |
 | Build-time env reached the image | Grep the built bundle for a known public value | The value appears in the bundle |
-| Deploy cadence matches Railway's | Unit tests on the release planner | An unrelated merge restarts no workers |
+| Deploy cadence matches Railway's, if Railway used watch patterns or release windows | Unit tests on the release planner | An unrelated merge restarts no workers |
 
 Before traffic moves:
 
@@ -124,7 +156,9 @@ Before retiring Railway:
 
 | Check | Check with | Good looks like |
 |---|---|---|
-| Retired services stay retired | Each retired service's deployment list an hour later | No active deployments |
+| Retired services stay retired | Each retired service's deployment list an hour later, and again a day later | No active deployments |
 | CI can't scale production down by accident | `scripts/check-replica-drops.mjs` in the deploy job | A deploy that lowers a replica count without changing the replica file fails |
 | Main matches what is running | `tofu plan` against production | No changes |
-| Nothing still calls the old platform | Railway's request logs for each service | Quiet for a day |
+| Nothing still calls the old platform | Per-service request counts, then the HTTP log for whatever is left | Only clients holding a stale DNS answer or an old connection |
+| CI no longer needs Railway | `grep -rli railway .github/` (or your CI's config) | Every match is removed or disabled, including jobs that only read Railway's API |
+| No production secrets stay on Railway | The environment's shared variable names | None left, or every one of those secrets rotated |

@@ -5,8 +5,9 @@
 //
 //   node railway-inventory.mjs [environment-name] > inventory.md
 //
-// It calls `railway status --json` once and `railway variables --json` once
-// per service, and prints variable NAMES only, never values. Nothing is
+// It calls `railway status --json` and `railway list --json` once each and
+// `railway variables --json` once per service, and prints variable NAMES
+// only, never values. Nothing is
 // created, changed or deployed. Tested with Railway CLI 5.71 (Oct 2026); if a
 // newer CLI changes these JSON shapes, the script fails loudly rather than
 // guessing.
@@ -70,21 +71,44 @@ export function describeService(instance, serviceName, variables) {
   };
 }
 
-export function inventory(status, environmentName, variablesFor) {
-  const environment = nodes(status.environments, "environments").find((env) => env.name === environmentName);
+// `projects` is `railway list --json`. Other environments and projects get one
+// line each: a staging environment deploying from the same branch, or a
+// project nobody remembers, is easy to miss when the time comes to delete.
+export function inventory(status, environmentName, variablesFor, projects) {
+  expect(Array.isArray(projects), "project list is not an array");
+  const environments = nodes(status.environments, "environments");
+  const environment = environments.find((env) => env.name === environmentName);
   if (!environment) {
     throw new Error(`No environment named "${environmentName}" in project ${status.name}.`);
   }
   const serviceNames = new Map(nodes(status.services, "services").map((s) => [s.id, s.name]));
+  const nameOf = (instance) => {
+    const name = serviceNames.get(instance.serviceId) ?? instance.serviceName ?? instance.serviceId;
+    expect(name, "a service instance has no id or name");
+    return name;
+  };
   const services = nodes(environment.serviceInstances, "serviceInstances").map((instance) =>
-    describeService(instance, serviceNames.get(instance.serviceId) ?? instance.serviceId, variablesFor(instance.serviceId, environment.id))
+    describeService(instance, nameOf(instance), variablesFor(instance.serviceId, environment.id))
   );
+  // Without the linked project in the list, "other projects" can't be trusted.
+  expect(status.id && projects.some((project) => project.id === status.id), "the linked project is missing from `railway list`");
   return {
     project: status.name,
     environment: environmentName,
     services: services.sort((a, b) => a.service.localeCompare(b.service)),
     volumes: nodes(environment.volumeInstances, "volumeInstances").map((v) => v.volume?.name ?? v.id),
     buckets: status.buckets ? nodes(status.buckets, "buckets").map((b) => b.name) : [],
+    otherEnvironments: environments
+      .filter((env) => env !== environment)
+      .map((env) => ({ name: env.name, services: nodes(env.serviceInstances, `serviceInstances of ${env.name}`).map(nameOf).sort() })),
+    otherProjects: projects
+      .filter((project) => project.id !== status.id)
+      .map((project) => ({
+        name: project.name,
+        workspace: project.workspace?.name ?? null,
+        environments: nodes(project.environments, `environments of ${project.name}`).map((env) => env.name),
+        services: nodes(project.services, `services of ${project.name}`).map((s) => s.name).sort(),
+      })),
   };
 }
 
@@ -122,6 +146,22 @@ export function toMarkdown(report) {
     `Buckets: ${cell(report.buckets)}`,
     "",
     "Railway's metrics are summed across replicas; divide by the replica count before sizing containers.",
+    "",
+    "## Everything else on Railway",
+    "",
+    "Decide each of these on purpose before deleting anything. An environment in the same project can deploy from the same branch.",
+    "",
+    "| other environment in this project | services |",
+    "|---|---|",
+    ...(report.otherEnvironments.length > 0
+      ? report.otherEnvironments.map((e) => `| ${[e.name, e.services].map(cell).join(" | ")} |`)
+      : ["| none | – |"]),
+    "",
+    "| other project | workspace | environments | services |",
+    "|---|---|---|---|",
+    ...(report.otherProjects.length > 0
+      ? report.otherProjects.map((p) => `| ${[p.name, p.workspace, p.environments, p.services].map(cell).join(" | ")} |`)
+      : ["| none | – | – | – |"]),
   ];
   return `${lines.join("\n")}\n`;
 }
@@ -131,8 +171,11 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const railway = (args) =>
     JSON.parse(execFileSync("railway", args, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 64 * 1024 * 1024 }));
   const status = railway(["status", "--json"]);
-  const report = inventory(status, environmentName, (serviceId, environmentId) =>
-    railway(["variables", "--json", "--service", serviceId, "--environment", environmentId])
+  const report = inventory(
+    status,
+    environmentName,
+    (serviceId, environmentId) => railway(["variables", "--json", "--service", serviceId, "--environment", environmentId]),
+    railway(["list", "--json"])
   );
   process.stdout.write(toMarkdown(report));
 }

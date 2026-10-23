@@ -21,6 +21,18 @@ building, deploying or running. A removed deployment drains for the service's
 that is still in flight when the drain ends gets cut off. Idempotent periodic
 work picks up again on its next run.
 
+The calls, as the original migration made them: run `railway whoami` to
+refresh the login, take the token from `user.accessToken` in
+`~/.railway/config.json`, and POST each mutation to
+`https://backboard.railway.com/graphql/v2` with `Authorization: Bearer
+<token>`. Read the token into a variable inside a script and never echo or
+log it. For example `{"query":"mutation { deploymentRemove(id: \"<id>\") }"}`.
+`railway deployment list --json -s <service> -e <environment>` gives each
+deployment's `id` and `status`. Remove the ones in SUCCESS or DEPLOYING,
+cancel the ones in BUILDING, QUEUED, WAITING or INITIALIZING, wait a few
+seconds and list again, and fail loudly if anything is still active after a
+few rounds.
+
 If your repo deploys to Railway from a scheduled job ("deploy main to every
 service whose watched files changed"), that job sees a stopped service as
 behind and redeploys it at the next window. Add a list of retired services
@@ -44,8 +56,16 @@ shows up as "Not Authorized" from the API, and `railway whoami` refreshes it.
 
 Log reads through the CLI and Railway's MCP server are often scoped to the
 current deployment, so a service in the middle of redeploying shows no logs at
-all. To find out whether something is used, query the database for its most
-recent activity instead.
+all. Observed: `railway logs --http` printed nothing for a service whose
+request log the MCP server's `get-logs` (type `http`) returned in full. For
+"is anything calling this", start from per-service request counts (`railway
+metrics`, or the MCP server's `http-requests`), then read the HTTP log for
+whatever is left. For "does anyone use this feature", query the database for
+its most recent activity.
+
+The MCP server's `list-variables` returns values in plain text. To work with
+variables without printing secrets, call `railway variables --json` from a
+script that prints names only.
 
 ## Hostnames and the edge
 
@@ -63,7 +83,33 @@ responses may depend on; set the ALB's `idle_timeout` to match.
 
 A custom domain on Railway needs only a CNAME, but Railway issues the
 certificate after the CNAME points at it. Pointing a hostname back at Railway
-during a rollback therefore takes a few minutes before HTTPS works.
+during a rollback therefore takes a few minutes before HTTPS works, and works
+only while the custom domain is still attached to the Railway service. Leave
+those domains attached until you give up the rollback.
+
+## Deleting services, variables and buckets
+
+Observed: a batch of `delete-service` calls through Railway's MCP server, sent
+in parallel, each returned success, and all but one of the services were still
+there afterwards. Delete one service at a time. The API's `serviceDelete(id,
+environmentId)` took a minute or two per call, and some calls came back with
+an empty body or "Not Authorized" and needed a retry, so judge success by
+listing the environment again (`environment(id: "<id>") { serviceInstances {
+edges { node { serviceName } } } }`), never by the call's response.
+
+Passing an `environmentId` removes the service from that environment only. A
+project often has a staging environment holding the same services and
+deploying from the same branch, so read the inventory's list of other
+environments and projects first and decide each one on purpose.
+
+Observed: deleting every service in the production environment left its
+shared variables in place, every production secret among them. Delete the shared variables once nothing on Railway reads
+them, or rotate those secrets. Buckets and volumes are separate resources too.
+
+Before deleting, search CI for Railway. Workflows that deploy to it are easy
+to find, but a job that only reads Railway's API for some other purpose (in
+the original migration, a reporting job that read deployment history) fails on
+every run once the services are gone.
 
 ## Builds
 
@@ -95,7 +141,9 @@ changed. On ECS each of these has to be configured on purpose.
 ## Metrics and billing
 
 Railway reports a service's CPU, memory and network as the sum across its
-replicas. Divide by the replica count before sizing a container. Railway
+replicas. Divide by the replica count before sizing a container. `railway
+metrics --all --network --since 7d` prints public network traffic for every
+service in the environment, which is the starting point for a NAT estimate. Railway
 charges for egress and not for traffic between its own services, whereas AWS
 charges NAT processing on traffic in both directions as well as data
 transfer out.

@@ -25,8 +25,15 @@ Undo: `tofu destroy`. Nothing depends on the stack yet.
 
 ## 2. Seed env and build images
 
-Run the seed as a dry run first; it should print variable names only. Supply
-sealed values through an overrides file, apply, and commit `env-keys.json`.
+Run the seed as a dry run first; it should print variable names only. A
+sealed value can be copied from another service's readable copy when every
+readable copy agrees; otherwise supply it through an overrides file. Then
+apply and commit `env-keys.json`.
+
+Re-run the seed whenever a Railway variable changes, until Railway is
+retired. When a variable goes away, keep its value in the secret until no
+running task definition maps it any more, because ECS refuses to start a task
+whose mapped secret key is missing.
 Build images in CI, or in a one-off AWS CodeBuild project fed by `git archive
 HEAD | aws s3 cp - s3://<bucket>/src.zip` if CI can't deploy before the first
 merge.
@@ -84,7 +91,10 @@ it is consuming, using whatever the queue offers: active consumers, receive
 counts or the engine's list of pollers. Some engines keep listing a consumer
 for several minutes after it stops, so prefer a "last seen" timestamp over a
 plain list. On Fargate, a task's hostname is its private IP name (`ip-10-…`),
-which tells you which platform a consumer runs on.
+which tells you which platform a consumer runs on. Before scaling anything,
+count consumers per queue and per platform: the Railway count for each queue
+should equal the replica count of the service behind it. If it doesn't, the
+counting method is wrong, and it will mislead you during the move.
 
 New consumers may receive little work at first, either because the queue is
 quiet or because some engines keep in-progress work on the worker that
@@ -109,7 +119,9 @@ Put both stacks on the same commit, so no user sees code go backwards during
 the switch. Then edit the existing record in place to point at the load
 balancer. Deleting it and creating a new one leaves a gap in which lookups
 return NXDOMAIN. A hostname at the zone apex can't be a CNAME, so it needs an
-alias record (Route 53) or CNAME flattening (Cloudflare and others).
+alias record (Route 53) or CNAME flattening (Cloudflare and others). Run the
+change and its undo once on a hostname nobody uses before running it on a
+real one.
 
 Check: the load balancer's request count climbs within a couple of minutes,
 targets stay healthy and target 5xx stays at zero. A burst of 4xx right after
@@ -122,8 +134,13 @@ treating it as a regression.
 Undo: the same edit with the old target, which takes effect within the 60
 second TTL.
 
-Some clients ignore TTLs and hold connections open for a long time, so keep
-the old web service running, idle, until its request log goes quiet.
+Some clients ignore TTLs or hold a connection open for hours, so the old web
+service keeps getting a trickle of requests. Look at who is still calling.
+In the original migration, the last callers were a few API clients and one
+browser tab with a long-lived stream. When only clients
+like these remain, retiring the old service is safe: their next connection
+resolves the name again and reaches AWS, and an open stream or session is
+interrupted once. Anything else in that log is a caller you haven't moved.
 
 ## 8. Move integrations
 
@@ -156,11 +173,23 @@ STOPPED, remove the Railway service from the deploy skip list and run
 
 Before turning on CI-driven applies, land every replica count you set by hand
 on main, because the first CI deploy applies main. Then retire the remaining
-Railway services, wait a week with them stopped, and delete the services,
-their domains and any buckets. Move any static cloud credentials the services
-still carry to the task role.
+Railway services and wait a week with them stopped. Move any static cloud
+credentials the services still carry to the task role.
 
-Check: `tofu plan` on main shows no changes, and each retired Railway service
-still has no active deployment a day later.
+Deleting is the step that ends the rollback, so prepare it fully (see
+"Deleting services, variables and buckets" in `railway-footguns.md`):
+
+- Read the inventory's list of other environments and projects, and decide
+  each one. Delete per environment.
+- Find every CI workflow that deploys to Railway or reads its API, and
+  disable or change it.
+- Delete services one at a time, listing the environment again after each.
+- Delete the environment's shared variables and any buckets, or rotate the
+  secrets they held.
+
+Check: `tofu plan` on main shows no changes, each retired Railway service
+still has no active deployment a day later, and after deletion the environment
+lists no services and no shared variables.
 Undo: until you delete the Railway services, restore any of them with the
-procedure in `railway-footguns.md` and point its traffic back.
+procedure in `railway-footguns.md` and point its traffic back. After
+deletion, going back means rebuilding the services on Railway.

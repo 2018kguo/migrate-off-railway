@@ -98,12 +98,55 @@ the proxy's published address ranges.
 
 `tofu test` with `mock_provider "aws"` and `mock_provider "random"` plans and
 applies the whole stack against fake providers in a few seconds. The AWS
-provider still validated ARN-shaped arguments against mocks in our runs, so give the mocks
-real-looking ARNs for `aws_iam_role`, `aws_lb`, `aws_lb_listener`,
-`aws_lb_target_group`, `aws_acm_certificate`, `aws_secretsmanager_secret`,
-`aws_sns_topic` and `aws_s3_bucket`, and give `random_password` a result of at
-least sixteen characters, the minimum ElastiCache accepts for an auth
-token.
+provider still validated ARN-shaped arguments against mocks in our runs, so
+the mocks need real-looking ARNs, and `random_password` needs a result of at
+least sixteen characters, the minimum ElastiCache accepts for an auth token.
+These are the mocks the original stack's tests used; add a `mock_resource`
+for any other resource whose ARN another resource takes as input.
+
+```hcl
+mock_provider "aws" {
+  mock_data "aws_caller_identity" {
+    defaults = { account_id = "123456789012" }
+  }
+  mock_data "aws_iam_policy_document" {
+    defaults = { json = "{}" }
+  }
+  mock_data "aws_availability_zones" {
+    defaults = { names = ["us-east-1a", "us-east-1b", "us-east-1c"] }
+  }
+  mock_resource "aws_iam_role" {
+    defaults = { arn = "arn:aws:iam::123456789012:role/mock" }
+  }
+  mock_resource "aws_lb" {
+    defaults = { arn = "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/mock/1" }
+  }
+  mock_resource "aws_lb_listener" {
+    defaults = { arn = "arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/app/mock/1/1" }
+  }
+  mock_resource "aws_lb_target_group" {
+    defaults = { arn = "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/mock/1" }
+  }
+  mock_resource "aws_acm_certificate" {
+    defaults = { arn = "arn:aws:acm:us-east-1:123456789012:certificate/mock" }
+  }
+  mock_resource "aws_sns_topic" {
+    defaults = { arn = "arn:aws:sns:us-east-1:123456789012:mock" }
+  }
+  mock_resource "aws_s3_bucket" {
+    defaults = { arn = "arn:aws:s3:::mock-logs", id = "mock-logs" }
+  }
+  mock_resource "aws_secretsmanager_secret" {
+    defaults = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:mock" }
+  }
+}
+
+mock_provider "random" {
+  mock_resource "random_password" {
+    defaults = { result = "mockmockmockmockmockmockmockmock" }
+  }
+}
+```
 
 The tests can read the old platform's files directly, so parity checks stay
 true when someone edits `railway.json`:
@@ -111,7 +154,18 @@ true when someone edits `railway.json`:
 
 Guard the replica map with variable validations so that `tofu plan` itself
 rejects a misspelled service name, which would otherwise run zero copies of
-the intended service, and a scheduler count above one.
+the intended service, and a scheduler count above one. A test proves each
+guard by expecting the plan to fail:
+
+```hcl
+run "rejects_misspelled_service" {
+  command = plan
+  variables {
+    replicas = { wroker = 2 }
+  }
+  expect_failures = [var.replicas]
+}
+```
 
 These assertions earned their place in the original migration:
 

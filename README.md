@@ -21,6 +21,13 @@ It never loads on its own. Start it when you want it:
 /migrate-off-railway
 ```
 
+A good first request keeps everything read-only until you've seen the plan:
+
+```
+/migrate-off-railway inventory our Railway production environment and
+propose a plan for our setup. Don't create or change anything yet.
+```
+
 ## What's in it
 
 `skills/migrate-off-railway/SKILL.md` is the entry point: the order of the
@@ -41,7 +48,8 @@ The `references` folder holds the detail for each phase:
 The `scripts` folder has two small tools, each with tests:
 
 - `railway-inventory.mjs` writes a read-only Markdown inventory of a Railway
-  environment, listing variable names but never values
+  environment, listing variable names but never values, plus the project's
+  other environments and every other project `railway list` shows
 - `check-replica-drops.mjs` fails a deploy that would scale a running ECS
   service down when the replica file didn't change
 
