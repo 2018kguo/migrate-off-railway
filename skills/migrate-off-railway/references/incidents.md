@@ -164,16 +164,17 @@ load balancer's health checks stayed green.
 
 The instance had been launched with a pre-created interface as its
 primary, and the interface's source/destination check came up on, though
-it had been created with the check off: the instance's default, on, won
-(whether EC2 or the provider applied it wasn't established). EC2 then
-dropped every packet the instance forwarded. None of the checks exercised forwarding: the
+it had been created with the check off. This is an open AWS provider issue
+(hashicorp/terraform-provider-aws#44768): with a primary network interface,
+the provider flips the check between the instance and the interface on
+alternate applies. EC2 then dropped every packet the instance forwarded. None of the checks exercised forwarding: the
 instance's own traffic doesn't need it, and health checks don't need
 egress. Turning the check off on the interfaces restored egress in under a
 minute, after each zone had been down for a few minutes.
 
-A plan for the follow-up change would have turned it back on, because the
-provider defaults the instance's value to on and won't set it alongside a
-primary interface. Each instance now turns the check off for itself at
+A plan for the follow-up change would have turned it back on, the next
+step of the same flip, and the provider won't let the instance set the
+value alongside a primary interface. Each instance now turns the check off for itself at
 boot, OpenTofu ignores that attribute, the deploy refuses any plan that
 turns it on for a NAT instance or interface, and the move script refuses to
 switch unless the check is off and routes the zone back if no task traffic

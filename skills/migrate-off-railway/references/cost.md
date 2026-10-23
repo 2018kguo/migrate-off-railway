@@ -199,7 +199,13 @@ Workers that pull from a queue need different signals from web services.
   signal. If CPU can scale out, make the scale-in condition require low
   CPU too, or a few CPU-heavy jobs make it flap.
 - Treat missing data as "do nothing", and alarm on it separately: a
-  worker that stops reporting can't scale in, and you want to know.
+  worker that stops reporting can't scale in, and you want to know. In a
+  metric-math scale-in alarm, wrap the load metric in `FILL(metric, 100)`
+  so a gap reads as fully busy, for example
+  `IF(FILL(slots, 100) < 20 AND cpu < 30, 1, 0)`. Without it the result
+  depends on how CloudWatch evaluates a gap inside the expression, which
+  is easy to get wrong in review; graph the expression over a period with
+  no load data to check.
 - A step policy fires again every minute while its alarm stays in ALARM;
   its cooldown is what spaces the removals.
 - With release windows, the stack can apply the scaling policies before
@@ -282,9 +288,13 @@ Not run in the original migration; verify each step.
   `bw_out_allowance_exceeded` counters (from `ethtool -S`), which rise
   when EC2 starts dropping flows or packets at the instance's limits.
 
-  Two failures pass every health check. An instance launched with an
-  existing interface as its primary can come up with source/destination
-  checking on and drop every forwarded packet; `references/failure-drills.md`
+  Two failures pass every health check. With an existing interface as an
+  instance's primary, the AWS provider flips source/destination checking
+  between the instance and the interface on alternate applies
+  (hashicorp/terraform-provider-aws#44768), and whenever it is on, EC2
+  drops every forwarded packet. Put `source_dest_check` in the instance's
+  `ignore_changes`, have the instance turn the check off for itself at
+  boot, and refuse any plan that turns it on. `references/failure-drills.md`
   has the checklist and a canary that proves forwarding first, and
   `references/incidents.md` the story. And the instance needs internet at
   boot while the zone's Elastic IP is still on the gateway, so it starts

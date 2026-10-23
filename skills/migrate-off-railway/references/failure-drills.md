@@ -36,6 +36,7 @@ phase you're in. Placeholders are in angle brackets.
 
 | Failure mode | Test | Pass |
 |---|---|---|
+| Missing load data reads as idle and removes tasks | Graph the scale-in alarm's expression for a service over a period with no load data (`aws cloudwatch get-metric-data` with the same metric queries) | It reads 0 throughout; wrap the load metric in `FILL(metric, 100)` so this doesn't depend on how a gap is evaluated |
 | The workers never report their load metric | `aws cloudwatch list-metrics --namespace <ns> --metric-name <slot metric>` a few minutes after the image that emits it is out | One series per scaled service |
 | Target tracking removes most of a fleet at once | `tofu test` that every target tracking policy has `disable_scale_in = true` | Asserted |
 | Scale-in removes more than one task | In a quiet hour, on a service running above its floor: `aws cloudwatch set-alarm-state --alarm-name <scale-in alarm> --state-value ALARM --state-reason drill`, then `aws ecs describe-services`. The removed task's jobs restart | The desired count drops by exactly one, and stays there for the cooldown |
@@ -56,11 +57,13 @@ Checklist before routing a zone to its instance:
 
 - Source/destination checking is off on the instance and on its interface:
   `aws ec2 describe-instances --instance-ids <id> --query 'Reservations[0].Instances[0].SourceDestCheck'`
-  and the same for the interface. Launching an instance with an existing
-  interface as its primary applies the instance's setting, which defaults
-  to on, over the interface's. Have the instance turn it off for itself at
-  boot, and keep OpenTofu from turning it back on (`ignore_changes` on the
-  instance; a check on the saved plan in the deploy).
+  and the same for the interface. With an existing interface as an
+  instance's primary, the AWS provider flips the check between the two on
+  alternate applies (hashicorp/terraform-provider-aws#44768). Have the
+  instance turn it off for itself at boot, and keep OpenTofu from turning
+  it back on (`source_dest_check` in the instance's `ignore_changes`; a
+  check on the saved plan in the deploy). Run `tofu plan` twice in a row
+  after the instances exist: neither should touch the check.
 - `sysctl net.ipv4.ip_forward` is 1 and the MASQUERADE rule is present.
 - The canary below passes.
 
@@ -93,6 +96,11 @@ After switching a zone:
   minutes. The load balancer's health checks don't need egress and will
   stay green while tasks can't reach their database.
 - Expect connections to reset at each route change, twice per zone.
+- Check the zone's outbound address, not only its route. A move that
+  stopped after routing to the instance but before the Elastic IP
+  attached leaves the zone on the temporary address, and a re-run that
+  only checks the route reports success. `curl checkip.amazonaws.com` from
+  the instance should print the zone's Elastic IP.
 
 Afterwards: land the code that matches before any apply runs, read its
 plan (it should release the temporary addresses and change nothing on the
