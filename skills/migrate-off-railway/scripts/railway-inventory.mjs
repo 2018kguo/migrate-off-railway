@@ -9,7 +9,7 @@
 // `railway variables --json` once per service, and prints variable NAMES
 // only, never values. Nothing is
 // created, changed or deployed. Tested with Railway CLI 5.71 (Oct 2026); if a
-// newer CLI changes these JSON shapes, the script fails loudly rather than
+// newer CLI changes these JSON shapes, the script fails loudly instead of
 // guessing.
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -166,7 +166,7 @@ export function toMarkdown(report) {
   return `${lines.join("\n")}\n`;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const environmentName = process.argv[2] ?? "production";
   const railway = (args) =>
     JSON.parse(execFileSync("railway", args, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 64 * 1024 * 1024 }));

@@ -29,8 +29,11 @@ balancer can't write to a bucket that uses KMS.
 The ECS cluster uses Fargate, plus Fargate Spot for batch work that is safe to
 retry. A single typed map of services drives the task definitions, services
 and target groups. Each entry corresponds to one Railway service and holds its
-image, release group, CPU and memory, working directory, hostnames, health
-path, whether it runs on Spot, and a heap size where one is needed.
+image, release group (see "The CI deploy workflow"), CPU and memory, working
+directory, hostnames, health path, whether it runs on Spot, and a heap size
+where one is needed. Replica counts live apart from it, in one variables
+file (the replica file, such as `prod.tfvars`), so changing a count is a
+one-line change the deploy guard can watch.
 
 Each service reads its env from one Secrets Manager secret holding a JSON
 object. The task definition maps every name listed in a committed
@@ -143,6 +146,10 @@ mock_provider "aws" {
   mock_resource "aws_secretsmanager_secret" {
     defaults = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:mock" }
   }
+  # Needed once a CloudWatch alarm triggers a scaling policy.
+  mock_resource "aws_appautoscaling_policy" {
+    defaults = { arn = "arn:aws:autoscaling:us-east-1:123456789012:scalingPolicy:mock:resource/ecs/service/mock/mock:policyName/mock" }
+  }
 }
 
 mock_provider "random" {
@@ -185,15 +192,71 @@ These assertions earned their place in the original migration:
 - web deploys roll back on the 5xx alarm.
 
 Break each asserted setting once on purpose and confirm the suite fails, so
-you know the assertions test something.
+you know the assertions test something. Assert concrete values, not the
+expression the resource itself uses: a test that repeats
+`lookup(var.replicas, k)` passes whatever the code does.
+
+A few HCL traps make assertions pass or fail for the wrong reason:
+
+- `||` and `&&` don't short-circuit, so `q.id != "x" || q.metric[0].name`
+  still evaluates the index on every element. Filter first:
+  `[for q in queries : q.metric if q.id == "x"]`.
+- Blocks the provider models as sets, such as `step_adjustment`, can't be
+  indexed with `[0]`; use a `for` expression.
+- A map attribute never equals an object literal: compare with
+  `tomap({ ServiceName = k })`.
+- A test can read the app's own source with `file()`, which keeps a metric
+  name in the infrastructure and the code that emits it from drifting
+  apart.
+
+## Autoscaling in the stack
+
+Once Application Auto Scaling owns a service's count, the stack has to stop
+setting it:
+
+- Give every service a scalable target. A fixed service gets min and max
+  both equal to its count, so the replica file still sets it exactly; a
+  scaled service gets a floor below its old count and that count as its
+  ceiling.
+- Set `lifecycle { ignore_changes = [desired_count] }` on the ECS service,
+  so an apply doesn't reset what scaling chose. `desired_count` then only
+  seeds a new service.
+- Registering a target whose max is below the running count scales the
+  service down to fit, and so does lowering max later. The replica-drop
+  guard has to read scaling targets, and compare a newly created target's
+  max with the service's current count.
+- Validate the floor at or below the ceiling, and give the singleton
+  scheduler service no scaling policy at all.
+
+`references/cost.md` covers which signals to scale on.
+
+## Before merging an infrastructure change
+
+Plan it against production, read-only, with the image tags that are
+deployed:
+
+```
+tofu plan -lock=false -var-file=prod.tfvars -var-file=deployed-tags.json -out=plan.out
+tofu show -json plan.out > plan.json
+node <skill-dir>/scripts/check-replica-drops.mjs plan.json false
+```
+
+Read every action in the plan: list every resource whose action isn't
+`no-op`, and for each updated one, which attributes change. A plan
+also carries every earlier merge that hasn't applied yet (deploys queue),
+so look only at the resources your change owns, or plan again after the
+earlier apply. A change meant to add scaling should touch only task
+definitions and new resources; a state move should show `no-op` moves.
+`-lock=false` keeps the read from blocking a CI apply.
 
 ## The CI deploy workflow
 
 Railway redeploys a service only when files in its watch patterns change, and
 many teams add release windows on top. Keep that behavior per release group,
-for example web and small apps on every merge, interactive workers every 20
-minutes and batch workers every 90, and ship a group only when its watch
-patterns match the changed files. Two details make the matching correct.
+a set of services that ship together, for example web and small apps on
+every merge, with short windows for interactive workers and longer ones for
+batch work. A release planner, a CI step that maps the changed files to the
+groups whose watch patterns match, decides which groups ship. Two details make the matching correct.
 Node's `path.matchesGlob` skips dotfiles where Railway's gitignore-style
 patterns don't, so match `dir/**` as a prefix. Run `git diff --name-only
 --no-renames` so that a file moved out of a watched directory counts there.
@@ -207,7 +270,7 @@ worker release.
 Inside that lock, read the currently deployed image tags again, move a group
 only to a commit that descends from the one it runs (`git merge-base
 --is-ancestor`), and always apply from the newest commit on main. Plan to a
-file, run `scripts/check-replica-drops.mjs` on it, then apply that saved plan.
+file, run `<skill-dir>/scripts/check-replica-drops.mjs` on it, then apply that saved plan.
 A change under the infra directory should apply even when no image needs
 building.
 
@@ -225,6 +288,12 @@ set `pipefail`, so a failing command piped into `tee` passes. When reading
 state that may not exist yet, treat only "not found" errors as empty, because
 an access-denied error read as "no tags yet" ships every group.
 
+With one apply lock that queues runs, a merge can wait behind several
+earlier runs. Watch the run for your own commit (`gh run list --commit
+<sha>`), not the newest one. A run dispatched seconds after re-enabling a
+paused workflow can sit queued with no jobs and nothing ahead of it;
+dispatch again, and check the new run starts.
+
 After a squash merge, the image tags recorded during the migration point at
 branch commits that are not ancestors of main, so the ancestry rule refuses
 every update. Before the first CI deploy, replace the recorded tags with a
@@ -234,18 +303,8 @@ previous deploy", which allows the update.
 
 ## Cost
 
-Railway bills what each replica uses, while Fargate bills what each task
-reserves. Keeping Railway's replica counts at full per-task sizes can cost
-several times the Railway bill, so price each service before cutover. The
-usual levers are fewer replicas each running more concurrent work, Fargate
-Spot for batch jobs, a Compute Savings Plan and arm64 images.
+`references/cost.md` covers it: why copying Railway's replica counts onto
+Fargate costs several times the Railway bill, how to replay Railway's usage
+to choose task sizes and a capacity model, how to scale queue workers, and
+what NAT, data transfer and observability add.
 
-NAT gateways cost about $32 a month each plus $0.045 per GB processed in both
-directions, which at a few terabytes a month comes to hundreds of dollars
-before data transfer charges. Measure each service's network traffic on
-Railway first. The S3 gateway endpoint takes image pulls off that bill.
-PrivateLink or VPC peering to the database, cache and queue removes most of
-the rest, and heavy batch workers can run in public subnets if they don't
-need fixed outbound addresses. Traffic to another AWS region costs about $0.02
-per GB, so run compute in the region that holds the database and queue, and
-know which dependencies live elsewhere.

@@ -49,14 +49,23 @@ The `references` folder holds the detail for each phase:
 - `cutover-runbook.md` covers the cutover, step by step, with a check and an
   undo for each step
 - `incidents.md` covers what went wrong in the original migration
+- `failure-drills.md` has a test for each of those failure modes, and the
+  checklist and canary for moving egress off NAT gateways
+- `cost.md` covers why Railway costs less than a copy of it on Fargate,
+  replaying Railway's usage to choose task sizes and between fixed Fargate,
+  scaled Fargate and ECS on EC2, scaling queue workers, and what NAT, data
+  transfer and discounts change
 - `stateful-and-other-cases.md` covers databases with volumes, push-style
   workers, other DNS providers and Kubernetes
 
-The `scripts` folder has two small tools, each with tests:
+The `scripts` folder has three small tools, each with tests:
 
 - `railway-inventory.mjs` writes a read-only Markdown inventory of a Railway
   environment, listing variable names but never values, plus the project's
   other environments and every other project `railway list` shows
+- `railway-usage-replay.mjs` reads 30 days of each service's memory and CPU
+  from Railway (read-only) and prices fixed Fargate, scaled Fargate and an
+  EC2 pool against it
 - `check-replica-drops.mjs` fails a deploy that would scale a running ECS
   service down when the replica file didn't change
 

@@ -5,7 +5,7 @@ describes the sequence of events and the guard that now prevents it.
 
 | What went wrong | The guard |
 |---|---|
-| A rotated password missed the CI secret, migrations failed silently, and code shipped ahead of its schema | CI secrets in the rotation checklist, deploys that wait for their migrations, `lock_timeout` with retries, an alert on failed migrations |
+| A rotated password missed the CI secret, migrations failed unnoticed, and code shipped ahead of its schema | CI secrets in the rotation checklist, deploys that wait for their migrations, `lock_timeout` with retries, an alert on failed migrations |
 | CI applied a stale replica file and scaled two services to zero | Replica counts change only through main, and `check-replica-drops.mjs` blocks unexplained drops |
 | Deploy lanes could roll each other back | One apply lock, a re-read of deployed tags inside it, and ancestry checks |
 | Retired Railway services were redeployed | Retiring through the API, a skip list in the deploy script, and a dead queue name |
@@ -14,8 +14,11 @@ describes the sequence of events and the guard that now prevents it.
 | Client IPs collapsed or could be forged behind the ALB | Trust only the last X-Forwarded-For entry, tested with forged headers |
 | An image lifecycle rule could delete a running image | A `deployed-*` tag protected by a higher-priority rule |
 | Nobody could edit a third-party registration | Owners listed in the inventory, and integrations on your own domain |
+| The new stack cost far more than expected | Size from Railway's 30-day usage replay, and let bursty services scale |
+| Autoscaling on CPU and memory would have stranded the busiest workers | Scale on busy slots; remove one task at a time |
+| Each zone lost egress for minutes when moved onto its NAT instance | The instance turns its source/destination check off at boot; a canary task proves forwarding first |
 
-## Migrations failed silently, then code shipped ahead of its schema
+## Migrations failed unnoticed, then code shipped ahead of its schema
 
 A credential rotation updated the database password in the runtime
 environment but not in the CI secret that the migration job uses. The
@@ -117,7 +120,62 @@ an earlier rule matched.
 An integration's provider-side registration pointed at a Railway-generated
 URL, and nobody on the team could find the account that owned it, so the URL
 couldn't be changed, and recreating the registration would have changed
-what customers had already installed. The
-inventory now lists each provider registration with its owner and whether it
-can be recreated, and every integration points at a hostname on the team's
-own domain.
+what customers had already installed. Each provider registration now goes
+into the inventory notes by hand, with its owner and whether it can be
+recreated, and every integration points at a hostname on the team's own
+domain.
+
+## The new stack reserved the peak all month
+
+The stack copied Railway's replica counts and gave every worker a full size
+task, because Railway's replicas had large limits. It worked, and cost far
+more than expected, because Fargate charged for every reserved task all
+month while Railway charges for use. A day of metrics on the new stack made
+the workers look nearly idle and would have sized them too small; Railway's
+longer history showed occasional spikes far above that.
+
+Sizing now comes from replaying Railway's 30-day usage
+(`scripts/railway-usage-replay.mjs`), steady services run a fixed count, and
+bursty workers run between a small floor and their old count.
+
+## Autoscaling on CPU and memory would have stranded the busiest workers
+
+The first autoscaling design tracked CPU and memory. Review caught three
+problems before it shipped. Workers waiting on slow network calls can
+fill every slot with idle CPU, so they would never have scaled out. Target
+tracking scales in proportionally, so a service at its full count and low
+load would have dropped to a fraction of it at once, restarting all those
+jobs together. And a worker polling several queues reported their
+average, so a full queue next to an idle one looked half empty.
+
+Workers now publish their busiest queue's slot usage as a metric, scale out
+on it and on CPU, and scale in through a step policy that removes one task
+after half an hour with both low. The replica-drop guard checks the scaling
+targets too, since a stale replica file now shows up as a lower maximum.
+
+## Each zone lost egress for minutes when moved onto its NAT instance
+
+The NAT gateways were replaced with one NAT instance per zone, keeping the
+Elastic IPs. Each instance passed its checks before taking traffic:
+forwarding enabled, the masquerade rule present, and the internet reachable
+from the instance. As each zone's route moved to its instance, the
+services in that zone started failing database and API calls, while the
+load balancer's health checks stayed green.
+
+The instance had been launched with a pre-created interface as its
+primary, and the interface's source/destination check came up on, though
+it had been created with the check off: the instance's default, on, won
+(whether EC2 or the provider applied it wasn't established). EC2 then
+dropped every packet the instance forwarded. None of the checks exercised forwarding: the
+instance's own traffic doesn't need it, and health checks don't need
+egress. Turning the check off on the interfaces restored egress in under a
+minute, after each zone had been down for a few minutes.
+
+A plan for the follow-up change would have turned it back on, because the
+provider defaults the instance's value to on and won't set it alongside a
+primary interface. Each instance now turns the check off for itself at
+boot, OpenTofu ignores that attribute, the deploy refuses any plan that
+turns it on for a NAT instance or interface, and the move script refuses to
+switch unless the check is off and routes the zone back if no task traffic
+arrives within a minute. `references/failure-drills.md` has the canary that
+proves forwarding without touching production routes.

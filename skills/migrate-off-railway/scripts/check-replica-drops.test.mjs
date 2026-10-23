@@ -40,6 +40,30 @@ test("a lower desired_count or a deleted service counts as a drop; a replacement
   ]);
 });
 
+test("with autoscaling, a lower ceiling or a new target under the live count is a drop", () => {
+  const target = (index, before, after) => ({
+    type: "aws_appautoscaling_target",
+    index,
+    change: { before: before === null ? null : { max_capacity: before }, after: { max_capacity: after } },
+  });
+  assert.deepEqual(
+    replicaDrops({
+      resource_changes: [
+        service("worker-a", 6, 6),
+        target("worker-a", 6, 3),
+        service("batch", 8, 8),
+        target("batch", null, 8),
+        service("worker-b", 4, 4),
+        target("worker-b", null, 2),
+      ],
+    }),
+    [
+      { service: "worker-a", before: 6, after: 3 },
+      { service: "worker-b", before: 4, after: 2 },
+    ]
+  );
+});
+
 test("a drop fails unless the replica file changed", () => {
   const file = join(mkdtempSync(join(tmpdir(), "replica-drops-")), "plan.json");
   writeFileSync(file, JSON.stringify(plan));

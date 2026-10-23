@@ -15,8 +15,9 @@ before starting, because those need a data migration that this flow doesn't
 cover.
 
 Every rule here comes from something that broke, or nearly broke, in a real
-migration. `references/incidents.md` tells those stories, and the other
-references hold the detail for each phase.
+migration. `references/incidents.md` tells those stories,
+`references/failure-drills.md` has a test for each failure mode, and the
+other references hold the detail for each phase.
 
 ## The shape of the work
 
@@ -60,7 +61,8 @@ Check the tools first, and stop to ask for whatever is missing:
 Then ask the person you're working with, before writing any infrastructure:
 
 - Which AWS account and region. Compute belongs in the region that holds the
-  database and queue.
+  database and queue, and the bucket, cache and vector store belong there
+  too: anything elsewhere pays NAT and cross-region transfer on every byte.
 - Who hosts DNS for the hostnames users call, and whether records can be
   changed through that provider's API.
 - ECS or Kubernetes.
@@ -88,18 +90,30 @@ Work in this order, reading the matching reference as you reach each phase.
    the decision table below for every service.
    `references/railway-footguns.md` lists what the inventory has to look
    for beyond what the script reports.
-2. Images and stack. Build the images and an OpenTofu stack with every replica
-   count at 0, following `references/aws-blueprint.md`. Nothing receives
-   traffic yet.
-3. Env seed. Copy each service's variables into a secret per service,
-   committing only the key names. The blueprint describes how to handle sealed
-   variables and Railway-only hostnames.
-4. Tests and an independent review. Run the parity tests and have someone, or
+2. Capacity and cost. Railway packs services onto shared hosts and bills
+   what they use, so its replica counts were never a sizing decision. Run
+   `node <skill-dir>/scripts/railway-usage-replay.mjs production --days 30`
+   before Railway's history goes away, and choose each service's task size
+   and whether its count is fixed or follows the load. A fixed Fargate fleet
+   at Railway's counts reserves the peak all month, which can cost several
+   times the Railway bill for a bursty app. `references/cost.md`
+   explains how to read the replay, scale queue workers and price the rest.
+3. Images and stack. Write an OpenTofu stack with every replica count at 0,
+   following `references/aws-blueprint.md`, and build the images. Don't
+   apply it yet.
+4. Env seed. Copy each service's variables into a secret per service,
+   committing only the key names. Runbook step 2 has the seed's rules
+   (sealed variables, Railway-only hostnames, removed keys).
+5. Tests and an independent review. Run the parity tests and have someone, or
    a separate agent with no stake in the design, review the diff for ways it
-   breaks production. In the migration this playbook comes from, review
-   found more than ten real defects before any traffic moved.
-5. Cutover. Follow `references/cutover-runbook.md`, one service or queue at a
-   time, verifying each step before starting the next.
+   breaks production. These gate the first `tofu apply`. In the migration
+   this playbook comes from, review found more than ten real defects before
+   any traffic moved.
+6. Cutover. Follow `references/cutover-runbook.md`. Its steps 1 and 2 apply
+   the stack at zero replicas and run the seed from steps 3 and 4 above;
+   from step 3 on it moves traffic, one service or queue at a time,
+   verifying each step before starting the next. Before each risky step,
+   run its drill from `references/failure-drills.md`.
 
 ## Fit the flow to your setup
 
@@ -116,13 +130,16 @@ so after the inventory, work out which steps apply and skip the rest.
 | A database, Redis or bucket with data lives on Railway | Plan and rehearse the data move first. It sets the length of any write freeze. |
 | Some services stay on Railway for now | Point the services that move at the ones that stay through their public hostnames, since `*.railway.internal` only resolves inside Railway, and expect egress charges on both sides. |
 | The target is Kubernetes (EKS or another cluster) | The order, the checks and the Railway notes carry over; the stack and its settings don't (`references/stateful-and-other-cases.md`). |
-| A few services, no release windows or watch patterns on Railway | Deploy every service on every merge and skip the release planner and its check. |
+| A few services, no release windows or watch patterns on Railway | Deploy every service on every merge and skip the release planner (`references/aws-blueprint.md`, "The CI deploy workflow") and its check. |
 
 ## Deciding what happens to each service
 
 | What the inventory shows | Decision |
 |---|---|
 | Serves requests or pulls jobs, no volume | Move it |
+| Railway runs it with several replicas | Treat that count as the ceiling scaling may reach: idle replicas cost almost nothing on Railway and a full task each on Fargate |
+| Its 30-day peak is close to its median | Fix its count, sized from its peak per replica |
+| Its peak is several times its median, for hours | Let its task count follow the load (`references/cost.md`) |
 | Last request or job is weeks old, or the feature it backs has no users | Retire it with the rest of Railway, after confirming usage in the database |
 | A volume, or a Railway-managed database that isn't a cache | Plan a data migration first (`references/stateful-and-other-cases.md`) |
 | Pinned to a different region than the other services | Find the dependency it sits next to before choosing its new region |
@@ -153,9 +170,11 @@ Before the first apply:
 | The ALB decides the client IP | A test that sends a forged `x-real-ip` and a forged X-Forwarded-For prefix | The app uses only the last X-Forwarded-For entry |
 | Singletons never run twice during a deploy | `tofu test` on the scheduler's deployment settings | Min healthy 0, max 100 |
 | Workers finish shutting down inside Fargate's 120 second stop timeout | `tofu test` on the shutdown grace env and `stopTimeout` | The worker's force-stop deadline, measured from SIGTERM, is below `stopTimeout` |
-| Smaller containers don't shrink the heap by accident | `tofu test` on `NODE_OPTIONS` or the equivalent | An explicit heap size wherever the old limit was much larger |
+| Smaller containers don't shrink the heap by accident | `tofu test` on `NODE_OPTIONS` or the equivalent | An explicit heap size wherever the old limit was much larger, within the headroom rule in `references/cost.md` ("Sizing a task") |
 | Build-time env reached the image | Grep the built bundle for a known public value | The value appears in the bundle |
 | Deploy cadence matches Railway's, if Railway used watch patterns or release windows | Unit tests on the release planner | An unrelated merge restarts no workers |
+| Each task fits its service's peak | `railway-usage-replay.mjs` against the task sizes | Memory comfortably above the peak per replica (a 15-minute average across replicas, so a single replica can go higher), with the heap headroom from `references/cost.md` |
+| Scaled workers scale on their load and shrink one task at a time | `tofu test` on the scaling policies | Scale-out on busy slots, target tracking scale-in disabled, a step policy of -1 |
 
 Before traffic moves:
 
@@ -166,13 +185,15 @@ Before traffic moves:
 | Deploys wait for their migrations | A commit with an unapplied migration | The deploy holds, then errors after its wait |
 | Migrations can't hold a lock on a busy table indefinitely | The migration runner's connection settings | A short `lock_timeout` and a retry on deadlock |
 | Egress cost is known | Railway's per-service network metrics | A monthly NAT estimate written down |
+| The monthly bill is known | The replay plus the stack's run rate from the AWS Pricing API | Within the budget, and a budget alarm set at it |
 
 Before retiring Railway:
 
 | Check | Check with | Good looks like |
 |---|---|---|
 | Retired services stay retired | Each retired service's deployment list an hour later, and again a day later | No active deployments |
-| CI can't scale production down by accident | `scripts/check-replica-drops.mjs` in the deploy job | A deploy that lowers a replica count without changing the replica file fails |
+| CI can't scale production down by accident | `node <skill-dir>/scripts/check-replica-drops.mjs` in the deploy job | A deploy that lowers a replica count or a scaling ceiling without changing the replica file fails |
+| Every infrastructure change was seen against production first | A read-only `tofu plan -lock=false` and the guard, before merging (`references/aws-blueprint.md`) | Only the intended resources change |
 | Main matches what is running | `tofu plan` against production | No changes |
 | Nothing still calls the old platform | Per-service request counts, then the HTTP log for whatever is left | Only clients holding a stale DNS answer or an old connection |
 | CI no longer needs Railway | `grep -rli railway .github/` (or your CI's config) | Every match is removed or disabled, including jobs that only read Railway's API |

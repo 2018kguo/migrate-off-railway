@@ -48,7 +48,7 @@ worker with an in-process schedule as a singleton, stopping the old copy
 before starting the new one, unless its jobs are protected against running
 twice.
 
-## DNS hosted somewhere other than the provider used here
+## Other DNS providers
 
 The DNS change in the runbook edits one CNAME in place through the DNS
 provider's API, with a 60 second TTL, and the same call with the old value
