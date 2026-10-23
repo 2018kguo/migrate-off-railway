@@ -1,5 +1,9 @@
 # The AWS side: stack, tests and deploys
 
+This file covers what to build on AWS, the settings that keep Railway's
+behavior, the tests that run before every apply, how CI deploys once the move
+is done, and what it costs.
+
 ## Stack
 
 State lives in an S3 bucket with versioning and encryption. OpenTofu 1.10 and

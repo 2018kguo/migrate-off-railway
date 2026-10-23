@@ -21,32 +21,26 @@ references hold the detail for each phase.
 ## The shape of the work
 
 ```
-inventory ─▶ images ─▶ stack at 0 replicas ─▶ env seed ─▶ tests + review
-   (read-only)                                                   │
-                                                                 ▼
-retire Railway ◀─ cron ◀─ integrations ◀─ web DNS ◀─ workers ◀─ shadow web
+Prepare: nothing moves               Cut over: one piece at a time
+
+  inventory (read-only)         ┌──▶ shadow web (reachable only by you)
+      │                         │        │
+  images, stack at 0 replicas   │    workers, queue by queue
+      │                         │        │
+  env seed                      │    web DNS
+      │                         │        │
+  tests + independent review ───┘    integrations
+                                         │
+                                     scheduler
+                                         │
+                                     retire Railway
 ```
 
-For an app with several services, expect the inventory and the stack to take
-most of a day and the traffic moves an afternoon. Leave the old services stopped
-but not deleted for at least a week after the last move.
-
-## Fit the flow to your setup
-
-The diagram shows the full flow for an app whose frontend, API, background
-workers and scheduler all run on Railway. Most apps are shaped differently,
-so after the inventory, work out which steps apply and skip the rest.
-
-| If your setup looks like this | What changes |
-|---|---|
-| The frontend runs elsewhere (Vercel, Netlify, a CDN) and only the API is on Railway | Moving web traffic means moving the API's hostname. If the frontend calls a `*.up.railway.app` URL, give the API a hostname on your own domain first and redeploy the frontend with it, so the switch becomes a DNS change. Check CORS allowed origins, and cookies scoped to the API's domain. |
-| A single service handles everything | One task definition, one hostname. The worker and scheduler steps disappear, but the checks on client IP, build env, drain time and secrets still apply. |
-| Only background workers run on Railway | No DNS change. Move workers queue by queue, then retire Railway. |
-| Workers run on a schedule, or are triggered over HTTP | The queue-sharing step doesn't apply. Treat each one as a singleton or as a web service (`references/stateful-and-other-cases.md`). |
-| A database, Redis or bucket with data lives on Railway | Plan and rehearse the data move first. It sets the length of any write freeze. |
-| Some services stay on Railway for now | Point the services that move at the ones that stay through their public hostnames, since `*.railway.internal` only resolves inside Railway, and expect egress charges on both sides. |
-| The target is Kubernetes (EKS or another cluster) | The order, the checks and the Railway notes carry over; the stack and its settings don't (`references/stateful-and-other-cases.md`). |
-| A few services, no release windows or watch patterns on Railway | Deploy every service on every merge and skip the release planner and its check. |
+The left column changes nothing users see. Every step on the right has an
+undo, until Railway's services are deleted at the very end. For an app with
+several services, expect the left column to take most of a day and the right
+column an afternoon. Leave the old services stopped but not deleted for at
+least a week after the last move.
 
 ## Before you start
 
@@ -57,8 +51,11 @@ Check the tools first, and stop to ask for whatever is missing:
 - `aws sts get-caller-identity` names the account you mean to deploy into.
 - `tofu version` is 1.10 or later, which locks state without a DynamoDB table.
 - Node 22 or later runs the scripts and their tests.
-- Something builds amd64 images: CI, CodeBuild, or Docker on an amd64
-  machine. Emulating amd64 on an arm64 laptop is too slow for a large build.
+- Something builds images for the CPU architecture your task definitions
+  use. Staying on x86 (`X86_64`, what Railway runs) keeps native
+  dependencies identical during the move, and arm64 can come later as a
+  cost step. Building x86 images by emulating them on an arm64 laptop is
+  too slow for a large build.
 
 Then ask the person you're working with, before writing any infrastructure:
 
@@ -87,9 +84,10 @@ Work in this order, reading the matching reference as you reach each phase.
    that directory run `node <skill-dir>/scripts/railway-inventory.mjs
    production > inventory.md`, where `<skill-dir>` is the directory holding
    this file. Run `railway metrics --all --network --since 7d -e production`
-   once for every service's traffic, which sets the NAT estimate. Fill in the decision table
-   below for every service. `references/railway-footguns.md` lists what the
-   inventory has to look for beyond what the script reports.
+   once for every service's traffic, which sets the NAT estimate. Fill in
+   the decision table below for every service.
+   `references/railway-footguns.md` lists what the inventory has to look
+   for beyond what the script reports.
 2. Images and stack. Build the images and an OpenTofu stack with every replica
    count at 0, following `references/aws-blueprint.md`. Nothing receives
    traffic yet.
@@ -102,6 +100,23 @@ Work in this order, reading the matching reference as you reach each phase.
    found more than ten real defects before any traffic moved.
 5. Cutover. Follow `references/cutover-runbook.md`, one service or queue at a
    time, verifying each step before starting the next.
+
+## Fit the flow to your setup
+
+The steps above are the full flow for an app whose frontend, API, background
+workers and scheduler all run on Railway. Most apps are shaped differently,
+so after the inventory, work out which steps apply and skip the rest.
+
+| If your setup looks like this | What changes |
+|---|---|
+| The frontend runs elsewhere (Vercel, Netlify, a CDN) and only the API is on Railway | Moving web traffic means moving the API's hostname. If the frontend calls a `*.up.railway.app` URL, give the API a hostname on your own domain first and redeploy the frontend with it, so the switch becomes a DNS change. Check CORS allowed origins, and cookies scoped to the API's domain. |
+| A single service handles everything | One task definition, one hostname. The worker and scheduler steps disappear, but the checks on client IP, build env, drain time and secrets still apply. |
+| Only background workers run on Railway | No DNS change. Move workers queue by queue, then retire Railway. |
+| Workers run on a schedule, or are triggered over HTTP | The queue-sharing step doesn't apply. Treat each one as a singleton or as a web service (`references/stateful-and-other-cases.md`). |
+| A database, Redis or bucket with data lives on Railway | Plan and rehearse the data move first. It sets the length of any write freeze. |
+| Some services stay on Railway for now | Point the services that move at the ones that stay through their public hostnames, since `*.railway.internal` only resolves inside Railway, and expect egress charges on both sides. |
+| The target is Kubernetes (EKS or another cluster) | The order, the checks and the Railway notes carry over; the stack and its settings don't (`references/stateful-and-other-cases.md`). |
+| A few services, no release windows or watch patterns on Railway | Deploy every service on every merge and skip the release planner and its check. |
 
 ## Deciding what happens to each service
 

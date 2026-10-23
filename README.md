@@ -28,6 +28,13 @@ A good first request keeps everything read-only until you've seen the plan:
 propose a plan for our setup. Don't create or change anything yet.
 ```
 
+## Reading it yourself
+
+To get the whole picture in about ten minutes, read the diagram and the
+"Where to stop and ask" list in `SKILL.md`, the table at the top of the
+cutover runbook, and the summaries at the top of `railway-footguns.md` and
+`incidents.md`. Everything else is detail for when you reach that step.
+
 ## What's in it
 
 `skills/migrate-off-railway/SKILL.md` is the entry point: the order of the

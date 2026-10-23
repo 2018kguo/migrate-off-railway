@@ -3,6 +3,19 @@
 Each step below says how to check it worked and how to undo it. Copy both
 into the cutover log before running the step.
 
+| Step | Do users reach the new stack? | Undo |
+|---|---|---|
+| 1. Bootstrap with no traffic | No | `tofu destroy` |
+| 2. Seed env and build images | No | Delete the secrets |
+| 3. Check connectivity | No | None needed |
+| 4. Shadow web | No, only you | Web's count back to 0 |
+| 5. Start inbound-only services | No, until DNS or a provider points at them | Count back to 0 |
+| 6. Move workers one queue at a time | Their background jobs do | Restore the Railway service, then lower the AWS count |
+| 7. Move web traffic | Yes | The same DNS edit with the old target |
+| 8. Move integrations | Yes, the provider's events | The old URL, or the old DNS record |
+| 9. Move the scheduler | Scheduled jobs run on AWS | AWS count to 0, then redeploy Railway's copy |
+| 10. Make main match production, retire Railway | Everything already does | Restore Railway services until they are deleted; after that, rebuild |
+
 ## 1. Bootstrap with no traffic
 
 Apply the stack with every replica count at 0. Add the ACM validation records

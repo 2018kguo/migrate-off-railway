@@ -4,6 +4,21 @@ Railway CLI 5.71, October 2026. Statements marked "observed" come from
 running that CLI and aren't in Railway's docs, so recheck them against the
 current CLI before relying on them.
 
+The sections below, one line each:
+
+- `railway scale <region>=0` doesn't stop a service. Remove its deployments
+  through the API, and keep your own deploy job from bringing it back.
+- Sealed variables read back as `null`, and log reads can come back empty.
+- `*.railway.internal` hostnames work only inside Railway, and Railway's edge
+  sets the `x-real-ip` header your app may trust.
+- Delete services one at a time and one environment at a time. Shared
+  variables, buckets and CI jobs outlive the services.
+- Railway builds with your service's variables set; a Docker build in CI
+  doesn't.
+- Railway gave you large containers, overlapping deploys and watch patterns
+  without anyone configuring them.
+- Railway's metrics are summed across replicas.
+
 ## Stopping a service
 
 Railway has no setting for zero replicas. Observed: running `railway scale
@@ -102,9 +117,10 @@ project often has a staging environment holding the same services and
 deploying from the same branch, so read the inventory's list of other
 environments and projects first and decide each one on purpose.
 
-Observed: deleting every service in the production environment left its
-shared variables in place, every production secret among them. Delete the shared variables once nothing on Railway reads
-them, or rotate those secrets. Buckets and volumes are separate resources too.
+Observed: deleting every service in the production environment left its shared
+variables in place, every production secret among them. Delete the shared
+variables once nothing on Railway reads them, or rotate those secrets. Buckets
+and volumes are separate resources too.
 
 Before deleting, search CI for Railway. Workflows that deploy to it are easy
 to find, but a job that only reads Railway's API for some other purpose (in
@@ -143,7 +159,7 @@ changed. On ECS each of these has to be configured on purpose.
 Railway reports a service's CPU, memory and network as the sum across its
 replicas. Divide by the replica count before sizing a container. `railway
 metrics --all --network --since 7d` prints public network traffic for every
-service in the environment, which is the starting point for a NAT estimate. Railway
-charges for egress and not for traffic between its own services, whereas AWS
-charges NAT processing on traffic in both directions as well as data
-transfer out.
+service in the environment, which is the starting point for a NAT estimate.
+Railway charges for egress and not for traffic between its own services,
+whereas AWS charges NAT processing on traffic in both directions as well as
+data transfer out.

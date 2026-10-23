@@ -3,6 +3,18 @@
 These happened, or nearly happened, during a real migration. Each section
 describes the sequence of events and the guard that now prevents it.
 
+| What went wrong | The guard |
+|---|---|
+| A rotated password missed the CI secret, migrations failed silently, and code shipped ahead of its schema | CI secrets in the rotation checklist, deploys that wait for their migrations, `lock_timeout` with retries, an alert on failed migrations |
+| CI applied a stale replica file and scaled two services to zero | Replica counts change only through main, and `check-replica-drops.mjs` blocks unexplained drops |
+| Deploy lanes could roll each other back | One apply lock, a re-read of deployed tags inside it, and ancestry checks |
+| Retired Railway services were redeployed | Retiring through the API, a skip list in the deploy script, and a dead queue name |
+| A scheduler would have run twice during every deploy | Minimum healthy 0 and maximum 100 for the scheduler, asserted by a test |
+| The Docker build lacked Railway's build env | Build env as a BuildKit secret, and a grep of the bundle |
+| Client IPs collapsed or could be forged behind the ALB | Trust only the last X-Forwarded-For entry, tested with forged headers |
+| An image lifecycle rule could delete a running image | A `deployed-*` tag protected by a higher-priority rule |
+| Nobody could edit a third-party registration | Owners listed in the inventory, and integrations on your own domain |
+
 ## Migrations failed silently, then code shipped ahead of its schema
 
 A credential rotation updated the database password in the runtime
