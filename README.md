@@ -1,4 +1,10 @@
-# migrate-off-railway
+<h1 align="center">migrate-off-railway</h1>
+<p align="center">Move from Railway to AWS one service at a time.</p>
+<p align="center">
+  <a href="#use-it">Use the skill</a> ·
+  <a href="#reading-it-yourself">Read the playbook</a> ·
+  <a href="#whats-in-it">What is included</a>
+</p>
 
 A playbook for moving a production app from Railway to AWS (ECS Fargate with
 OpenTofu or Terraform) one service at a time, without a maintenance window.
@@ -10,6 +16,8 @@ It works for other shapes than the one it came from: an API on Railway with
 the frontend elsewhere, a single service, only background workers, or some
 services staying on Railway. The skill starts by working out which of its
 steps your setup needs.
+
+## Use it
 
 ```bash
 npx skills add 2018kguo/migrate-off-railway
